@@ -1,0 +1,9 @@
+services:
+  tyre-defect-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8501:8501"
+    working_dir: /app
+    command: streamlit run streamlit_app.py --server.address=0.0.0.0 --server.port=8501
