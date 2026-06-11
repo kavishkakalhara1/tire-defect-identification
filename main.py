@@ -11,7 +11,7 @@ from torchvision import transforms, models
 # =====================================================================
 MODEL_PATH = 'tire_defect_resnet18.pth'
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-CLASS_NAMES = ['Defective', 'Good']
+CLASS_NAMES = ['Defective', 'Good']  # Verified: ImageFolder maps alphabetically (d before g)
 
 # Inspection Parameters
 TOTAL_TIMESTEPS = 12   # Number of rotational steps required to cover 360 degrees
@@ -21,12 +21,22 @@ NUM_CAMERAS = 3        # Number of synchronized inspection angles per step
 # 2. MODEL INITIALIZATION
 # =====================================================================
 def load_inspection_model(model_path):
+    """Rebuilds the exact training topology and binds the saved weights."""
     model = models.resnet18()
     num_features = model.fc.in_features
-    model.fc = nn.Linear(num_features, 2)
+    
+    # CORRECTED: Multi-layer classification head matching training topology exactly
+    model.fc = nn.Sequential(
+        nn.Linear(num_features, 256),
+        nn.ReLU(),
+        nn.Dropout(0.5),  
+        nn.Linear(256, len(CLASS_NAMES))
+    )
+    
+    # Load the trained math weights into the blueprint structure
     model.load_state_dict(torch.load(model_path, map_location=DEVICE))
     model = model.to(DEVICE)
-    model.eval()
+    model.eval()  # CRITICAL: Disables dropout layers for stable inference
     return model
 
 # Validation transform mappings matching training profile
@@ -41,17 +51,21 @@ inference_transforms = transforms.Compose([
 # =====================================================================
 def evaluate_frame_matrix(frame, model):
     """Processes a single raw camera matrix frame and returns status and confidence."""
+    # Convert OpenCV BGR array to standard RGB format
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     pil_img = Image.fromarray(rgb_frame)
+    
+    # Preprocess and inject batch dimension: [Channels, H, W] -> [1, Channels, H, W]
     input_tensor = inference_transforms(pil_img).unsqueeze(0).to(DEVICE)
     
     with torch.no_grad():
         outputs = model(input_tensor)
-        probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
-        confidence, predicted_idx = torch.max(probabilities, 0)
+        # CORRECTED: Clean batch-dimension multi-class evaluation logic
+        probabilities = torch.nn.functional.softmax(outputs, dim=1)
+        confidence, predicted_idx = torch.max(probabilities, dim=1)
         
     # Index 0 -> Defective, Index 1 -> Good
-    status = "Defective" if predicted_idx.item() == 0 else "Good"
+    status = CLASS_NAMES[predicted_idx.item()]
     return status, confidence.item() * 100
 
 # =====================================================================
@@ -93,7 +107,6 @@ def run_automated_inspection():
             print("--------------------------------------------------")
             
             # Temporary storage buffer for frames collected during this rotation
-            # Structure: list of dicts containing metadata and actual images
             inspection_buffer = []
 
             # Phase A: Mechanical Rotation & Image Acquisition
